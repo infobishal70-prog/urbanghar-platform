@@ -1,0 +1,44 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper function to check if the user is signed in
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Helper function to check if the user matches the expected ID
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+    }
+    
+    match /owners/{ownerId} {
+      allow read, write: if isOwner(ownerId);
+    }
+
+    match /pgs/{pgId} {
+      // Any authenticated user looking for a PG can read the listings (required for consumer portal)
+      // Actually, anyone should be able to read PGs if it's a public portal, but restricting to auth is safer if required.
+      // Easing to public reads since Home portals typically allow non-auth users to scroll listings.
+      allow read: if true;
+      allow write: if isAuthenticated(); // Only logged in partners/admins can list/update
+    }
+
+    match /visits/{visitId} {
+      allow read, write: if isAuthenticated();
+    }
+    
+    match /chats/{chatId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // A fallback rule allowing fallback admin behaviors. 
+    // It's still tightly restricted to people actively authenticated via a Firebase Auth token.
+    match /{document=**} {
+      allow read, write: if isAuthenticated();
+    }
+  }
+}

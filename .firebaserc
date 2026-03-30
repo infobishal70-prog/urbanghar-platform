@@ -1,0 +1,23 @@
+{
+  "projects": {
+    "default": "urbanghar-8dfb3"
+  },
+  "targets": {
+    "urbanghar-8dfb3": {
+      "hosting": {
+        "home": [
+          "urbanghar-app"
+        ],
+        "owner": [
+          "urbanghar-partner"
+        ],
+        "admin": [
+          "urbanghar-admin"
+        ],
+        "desk": [
+          "urbanghar-pitch"
+        ]
+      }
+    }
+  }
+}

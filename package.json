@@ -1,0 +1,13 @@
+{
+  "name": "urbanghar-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npx concurrently \"npm run dev -w apps/consumer\" \"npm run dev -w apps/partner\" \"npm run dev -w apps/admin\" \"npm run dev -w apps/pitch\"",
+    "build": "npm run build --workspaces --if-present",
+    "start": "npx concurrently \"npm run preview -w apps/consumer\" \"npm run preview -w apps/partner\" \"npm run preview -w apps/admin\" \"npm run preview -w apps/pitch\""
+  }
+}
