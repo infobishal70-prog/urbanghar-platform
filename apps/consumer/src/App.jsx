@@ -1,18 +1,76 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, lazy, Suspense } from 'react';
+import Fuse from 'fuse.js';
 import { auth, db } from './firebaseConfig';
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword, updatePassword, onAuthStateChanged, signOut } from "firebase/auth";
-import { doc, setDoc, getDoc, updateDoc, onSnapshot, collection, query, addDoc, serverTimestamp, where } from "firebase/firestore";
+import { doc, setDoc, getDoc, updateDoc, onSnapshot, collection, query, addDoc, serverTimestamp, where, orderBy, getDocs } from "firebase/firestore";
+import { messaging } from './firebaseConfig';
+import { onMessage } from 'firebase/messaging';
+import { requestForToken } from './lib/fcmUtils';
+
+// Lazy load the entire map component to prevent crashing the main bundle
+const PGMap = lazy(() =>
+  import('react-leaflet').then(({ MapContainer, TileLayer, Marker, Popup }) => ({
+    default: ({ pgs, onSelect, user, setShowAuthModal }) => {
+      // Fix Leaflet icons
+      import('leaflet').then(({ default: L }) => {
+        try {
+          const icon = L.icon({
+            iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+            iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
+            shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+            iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41],
+          });
+          L.Marker.prototype.options.icon = icon;
+        } catch(e) {}
+      });
+      return (
+        <div style={{ height: '600px' }} className="rounded-3xl overflow-hidden border border-slate-200 shadow-2xl">
+          <MapContainer center={[20.3000, 85.8245]} zoom={12} style={{ height: '100%', width: '100%' }} scrollWheelZoom>
+            <TileLayer
+              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            />
+            {pgs.filter(p => p.lat && p.lng).map(pg => (
+              <Marker key={pg.id} position={[pg.lat, pg.lng]}>
+                <Popup>
+                  <div style={{ minWidth: 180 }}>
+                    <img src={pg.img} alt={pg.title} style={{ width:'100%', height:96, objectFit:'cover', borderRadius:8, marginBottom:8 }} />
+                    <p style={{ fontWeight:900, color:'#1e293b', fontSize:14 }}>{pg.title}</p>
+                    <p style={{ color:'#4f46e5', fontWeight:700, fontSize:14 }}>₹{pg.price}/mo</p>
+                    <p style={{ color:'#94a3b8', fontSize:12, marginTop:2 }}>📍 {pg.location}</p>
+                    <button
+                      onClick={() => user ? onSelect(pg) : setShowAuthModal(true)}
+                      style={{ marginTop:8, width:'100%', padding:'6px 0', background:'#4f46e5', color:'white', fontSize:12, fontWeight:900, borderRadius:8, border:'none', cursor:'pointer' }}
+                    >View Details</button>
+                  </div>
+                </Popup>
+              </Marker>
+            ))}
+          </MapContainer>
+        </div>
+      );
+    }
+  }))
+);
 
 // 🚀 Real-time listings will be fetched from Firestore
 const fallbackPGs = [
-  { id: 1, title: "Elite Boys Stay", location: "Patia, near KIIT University", price: "7,500", rating: "4.8", type: "boys", owner: "Suresh Mohanty", availableBeds: "5", totalBeds: "20", owner_uid: "testOwner1", amenities: ["Free WiFi", "24/7 Power", "AC Rooms", "CCTV"], img: "https://images.unsplash.com/photo-1522771739844-6a9f6d5f14af?auto=format&fit=crop&q=80&w=800", availability: "Available Now" },
-  { id: 2, title: "Lotus Girls Niwas", location: "Nayapalli, behind Indradhanu Market", price: "6,800", rating: "4.5", type: "girls", owner: "Priyanka Jena", availableBeds: "2", totalBeds: "15", owner_uid: "testOwner2", amenities: ["Laundry", "Attached Washroom", "Kitchen Access", "Security"], img: "https://images.unsplash.com/photo-1598928506311-c55ded91a20c?auto=format&fit=crop&q=80&w=800", availability: "Filling Fast" },
+  { id: 1, title: "Elite Boys Stay", location: "Patia, near KIIT University", price: "7,500", rating: "4.8", type: "boys", owner: "Suresh Mohanty", availableBeds: "5", totalBeds: "20", owner_uid: "testOwner1", amenities: ["Free WiFi", "24/7 Power", "AC Rooms", "CCTV"], img: "https://images.unsplash.com/photo-1522771739844-6a9f6d5f14af?auto=format&fit=crop&q=80&w=800", availability: "Available Now", lat: 20.3522, lng: 85.8166 },
+  { id: 2, title: "Lotus Girls Niwas", location: "Nayapalli, behind Indradhanu Market", price: "6,800", rating: "4.5", type: "girls", owner: "Priyanka Jena", availableBeds: "2", totalBeds: "15", owner_uid: "testOwner2", amenities: ["Laundry", "Attached Washroom", "Kitchen Access", "Security"], img: "https://images.unsplash.com/photo-1598928506311-c55ded91a20c?auto=format&fit=crop&q=80&w=800", availability: "Filling Fast", lat: 20.2746, lng: 85.8258 },
 ];
 
 function App() {
   const [pgListings, setPgListings] = useState([]);
   const [searchTerm, setSearchTerm] = useState("");
   const [activeType, setActiveType] = useState("all");
+
+  // Advanced Filter States
+  const [showFilters, setShowFilters] = useState(false);
+  const [budgetMax, setBudgetMax] = useState(20000);
+  const [filterAC, setFilterAC] = useState("all");    // "all" | "ac" | "non-ac"
+  const [filterSharing, setFilterSharing] = useState("all"); // "all" | "single" | "double" | "triple"
+  const [activeFiltersCount, setActiveFiltersCount] = useState(0);
+  const [mapView, setMapView] = useState(false); // toggle between grid and map
   const [selectedPG, setSelectedPG] = useState(null);
 
   const [showAuthModal, setShowAuthModal] = useState(false);
@@ -39,6 +97,18 @@ function App() {
   const [editPhone, setEditPhone] = useState("");
   const [editPassword, setEditPassword] = useState("");
   const [isAuthProcessing, setIsAuthProcessing] = useState(false);
+
+  // Review States
+  const [reviews, setReviews] = useState([]);
+  const [reviewText, setReviewText] = useState("");
+  const [reviewRating, setReviewRating] = useState(5);
+  const [reviewHover, setReviewHover] = useState(0);
+  const [canReview, setCanReview] = useState(false);
+  const [isSubmittingReview, setIsSubmittingReview] = useState(false);
+  const [showReviewForm, setShowReviewForm] = useState(false);
+
+  // FCM States
+  const [fcmToast, setFcmToast] = useState(null);
 
   const getMaskedEmail = (phoneNum) => `${phoneNum.replace(/\s+/g, '').trim()}@urbanghar.com`;
 
@@ -162,6 +232,9 @@ function App() {
   useEffect(() => {
     let unsubAuth = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
+        // Request token on login!
+        requestForToken(firebaseUser.uid);
+        
         try {
           // 1. Try to get consumer data
           let userDoc = await getDoc(doc(db, "consumers", firebaseUser.uid));
@@ -215,6 +288,73 @@ function App() {
     };
   }, []);
 
+  // Foreground message listener
+  useEffect(() => {
+    if (!messaging) return;
+    const unsubscribe = onMessage(messaging, (payload) => {
+      console.log('Message received. ', payload);
+      setFcmToast({
+        title: payload.notification?.title || "New Notification",
+        body: payload.notification?.body || "",
+      });
+      setTimeout(() => setFcmToast(null), 5000);
+    });
+    return () => unsubscribe();
+  }, []);
+
+
+  // Fetch reviews & check if user can review when a PG is selected
+  useEffect(() => {
+    if (!selectedPG) { setReviews([]); setCanReview(false); return; }
+
+    const q = query(
+      collection(db, "reviews"),
+      where("pgId", "==", selectedPG.id),
+      orderBy("createdAt", "desc")
+    );
+    const unsub = onSnapshot(q, (snap) => {
+      setReviews(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+
+    // Check if current user has a completed visit for this PG
+    const checkCanReview = async () => {
+      if (!user) return setCanReview(false);
+      const vSnap = await getDocs(query(
+        collection(db, "visits"),
+        where("propertyId", "==", selectedPG.id),
+        where("userId", "==", user.uid),
+        where("status", "==", "Visit Completed")
+      ));
+      setCanReview(!vSnap.empty);
+    };
+    checkCanReview();
+
+    return () => unsub();
+  }, [selectedPG, user]);
+
+  const handleSubmitReview = async () => {
+    if (!reviewText.trim()) return;
+    setIsSubmittingReview(true);
+    try {
+      await addDoc(collection(db, "reviews"), {
+        pgId: selectedPG.id,
+        pgName: selectedPG.title,
+        userId: user.uid,
+        userName: user.name,
+        userPhoto: user.photo,
+        rating: reviewRating,
+        text: reviewText.trim(),
+        createdAt: serverTimestamp()
+      });
+      setReviewText("");
+      setReviewRating(5);
+      setShowReviewForm(false);
+    } catch (err) {
+      alert("Failed to submit review: " + err.message);
+    } finally {
+      setIsSubmittingReview(false);
+    }
+  };
 
   useEffect(() => {
      if (selectedPG && contactMode === "chat") {
@@ -288,15 +428,66 @@ function App() {
     setMode("login");
   };
 
-  const filteredPGs = pgListings.filter(pg => {
-    const matchesSearch = pg.location.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      pg.title.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesType = activeType === "all" || pg.type === activeType;
-    return matchesSearch && matchesType;
-  });
+  // Fuse.js fuzzy search instance
+  const fuse = useMemo(() => new Fuse(pgListings, {
+    keys: ['title', 'location', 'owner', 'amenities'],
+    threshold: 0.35,
+    includeScore: true,
+  }), [pgListings]);
+
+  // Count active non-default filters
+  useEffect(() => {
+    let count = 0;
+    if (budgetMax < 20000) count++;
+    if (filterAC !== 'all') count++;
+    if (filterSharing !== 'all') count++;
+    setActiveFiltersCount(count);
+  }, [budgetMax, filterAC, filterSharing]);
+
+  const filteredPGs = useMemo(() => {
+    // 1. Fuzzy text search
+    let results = searchTerm.trim()
+      ? fuse.search(searchTerm).map(r => r.item)
+      : pgListings;
+
+    // 2. Type filter (boys/girls/unisex)
+    if (activeType !== 'all') results = results.filter(pg => pg.type === activeType);
+
+    // 3. Budget filter
+    results = results.filter(pg => {
+      const price = parseInt(String(pg.price).replace(/,/g, '')) || 0;
+      return price <= budgetMax;
+    });
+
+    // 4. AC filter
+    if (filterAC === 'ac') results = results.filter(pg =>
+      pg.amenities?.some(a => a.toLowerCase().includes('ac')));
+    if (filterAC === 'non-ac') results = results.filter(pg =>
+      !pg.amenities?.some(a => a.toLowerCase().includes('ac')));
+
+    // 5. Sharing filter — matches amenity keywords
+    if (filterSharing !== 'all') results = results.filter(pg =>
+      pg.amenities?.some(a => a.toLowerCase().includes(filterSharing)));
+
+    return results;
+  }, [pgListings, searchTerm, activeType, budgetMax, filterAC, filterSharing, fuse]);
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
+
+      {/* FCM Toast */}
+      {fcmToast && (
+        <div className="fixed top-20 right-4 z-50 bg-white border border-slate-200 shadow-2xl rounded-2xl p-4 max-w-sm animate-in slide-in-from-top-2 flex gap-3 items-start">
+          <div className="w-10 h-10 bg-indigo-100 text-indigo-600 rounded-xl flex items-center justify-center shrink-0 font-black text-xl">🔔</div>
+          <div>
+            <h4 className="font-bold text-slate-900 text-sm">{fcmToast.title}</h4>
+            <p className="text-slate-500 text-xs mt-0.5">{fcmToast.body}</p>
+          </div>
+          <button onClick={() => setFcmToast(null)} className="text-slate-400 hover:text-slate-600 transition-colors">
+             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
+          </button>
+        </div>
+      )}
 
       {/* Navigation */}
       <nav className="sticky top-0 z-50 flex items-center justify-between px-4 sm:px-6 py-3 sm:py-4 bg-white/80 backdrop-blur-md border-b border-slate-100 shadow-sm">
@@ -344,7 +535,77 @@ function App() {
             <button onClick={() => setActiveType("all")} className={`px-6 py-2.5 rounded-full text-sm font-bold transition-all shadow-md ${activeType === 'all' ? 'bg-indigo-600 text-white' : 'bg-white border border-slate-100'}`}>All PGs</button>
             <button onClick={() => setActiveType("girls")} className={`px-6 py-2.5 rounded-full text-sm font-bold transition-all ${activeType === 'girls' ? 'bg-pink-500 text-white shadow-lg' : 'bg-white border border-slate-200'}`}>Girls Only</button>
             <button onClick={() => setActiveType("boys")} className={`px-6 py-2.5 rounded-full text-sm font-bold transition-all ${activeType === 'boys' ? 'bg-blue-600 text-white shadow-lg' : 'bg-white border border-slate-200'}`}>Boys Only</button>
+            {/* Filters Toggle */}
+            <button
+              onClick={() => setShowFilters(f => !f)}
+              className={`px-5 py-2.5 rounded-full text-sm font-bold transition-all flex items-center gap-2 border ${
+                showFilters || activeFiltersCount > 0
+                  ? 'bg-violet-600 text-white border-violet-600 shadow-lg'
+                  : 'bg-white border-slate-200 text-slate-700 hover:border-slate-400'
+              }`}
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2a1 1 0 01-.293.707L13 13.414V19a1 1 0 01-.553.894l-4 2A1 1 0 017 21v-7.586L3.293 6.707A1 1 0 013 6V4z" />
+              </svg>
+              Filters {activeFiltersCount > 0 && <span className="bg-white/30 text-white rounded-full px-1.5 py-0.5 text-[10px] font-black">{activeFiltersCount}</span>}
+            </button>
           </div>
+
+          {/* Collapsible Filter Panel */}
+          {showFilters && (
+            <div className="mt-6 max-w-2xl mx-auto bg-white rounded-2xl border border-slate-200 shadow-xl p-6 text-left animate-in slide-in-from-top-2 duration-300">
+              <div className="flex items-center justify-between mb-5">
+                <h3 className="font-black text-slate-900 text-sm uppercase tracking-widest">Advanced Filters</h3>
+                <button
+                  onClick={() => { setBudgetMax(20000); setFilterAC('all'); setFilterSharing('all'); }}
+                  className="text-xs font-bold text-indigo-600 hover:text-indigo-800 transition-colors"
+                >Reset All</button>
+              </div>
+
+              {/* Budget Slider */}
+              <div className="mb-6">
+                <div className="flex justify-between items-center mb-2">
+                  <label className="text-xs font-black text-slate-500 uppercase tracking-widest">Max Budget</label>
+                  <span className="text-sm font-black text-indigo-600">₹{budgetMax.toLocaleString('en-IN')}/mo</span>
+                </div>
+                <input
+                  type="range" min="2000" max="20000" step="500"
+                  value={budgetMax}
+                  onChange={e => setBudgetMax(Number(e.target.value))}
+                  className="w-full h-2 bg-indigo-100 rounded-full appearance-none cursor-pointer accent-indigo-600"
+                />
+                <div className="flex justify-between text-[10px] text-slate-400 mt-1">
+                  <span>₹2,000</span><span>₹20,000</span>
+                </div>
+              </div>
+
+              {/* AC Filter */}
+              <div className="mb-6">
+                <label className="text-xs font-black text-slate-500 uppercase tracking-widest mb-3 block">Air Conditioning</label>
+                <div className="flex gap-2">
+                  {[['all','Any'],['ac','AC ❄️'],['non-ac','Non-AC 🌡️']].map(([val, label]) => (
+                    <button key={val} onClick={() => setFilterAC(val)}
+                      className={`px-4 py-2 rounded-xl text-xs font-bold border transition-all ${
+                        filterAC === val ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-300'
+                      }`}>{label}</button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Sharing Filter */}
+              <div>
+                <label className="text-xs font-black text-slate-500 uppercase tracking-widest mb-3 block">Room Sharing</label>
+                <div className="flex flex-wrap gap-2">
+                  {[['all','Any'],['single','Single 🛏️'],['double','Double 🛏🛏'],['triple','Triple']].map(([val, label]) => (
+                    <button key={val} onClick={() => setFilterSharing(val)}
+                      className={`px-4 py-2 rounded-xl text-xs font-bold border transition-all ${
+                        filterSharing === val ? 'bg-violet-600 text-white border-violet-600' : 'bg-white border-slate-200 text-slate-600 hover:border-violet-300'
+                      }`}>{label}</button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
         </header>
       )}
 
@@ -352,69 +613,142 @@ function App() {
       <section className={`px-4 max-w-[1400px] mx-auto ${viewMode === "all" ? "pt-12 pb-16" : "pt-8 pb-4"}`}>
 
         {viewMode === "all" && (
-          <div className="flex items-center gap-4 mb-10 px-2">
-            <button
-              onClick={() => { setViewMode("home"); window.scrollTo({ top: 0, behavior: "smooth" }); }}
-              className="p-3 bg-white border border-slate-200 rounded-2xl hover:bg-slate-50 transition-colors shadow-sm"
-            >
-              <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="w-6 h-6 text-slate-700" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" /></svg>
-            </button>
-            <div>
-              <h2 className="text-3xl font-black text-slate-900">All Properties</h2>
-              <p className="text-slate-500 text-sm mt-1">Showing {filteredPGs.length} available accommodations</p>
+          <div className="flex items-center justify-between gap-4 mb-8 px-2">
+            <div className="flex items-center gap-4">
+              <button
+                onClick={() => { setViewMode("home"); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                className="p-3 bg-white border border-slate-200 rounded-2xl hover:bg-slate-50 transition-colors shadow-sm"
+              >
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" className="w-6 h-6 text-slate-700" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" /></svg>
+              </button>
+              <div>
+                <h2 className="text-3xl font-black text-slate-900">All Properties</h2>
+                <p className="text-slate-500 text-sm mt-1">Showing {filteredPGs.length} available accommodations</p>
+              </div>
+            </div>
+            {/* Right side controls */}
+            <div className="flex items-center gap-2">
+              {activeFiltersCount > 0 && (
+                <button
+                  onClick={() => { setBudgetMax(20000); setFilterAC('all'); setFilterSharing('all'); }}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-violet-50 text-violet-700 border border-violet-200 rounded-xl text-xs font-black hover:bg-violet-100 transition-all"
+                >
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2.5"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                  {activeFiltersCount} Filter{activeFiltersCount > 1 ? 's' : ''} Active
+                </button>
+              )}
+              {/* Map / Grid toggle */}
+              <div className="flex bg-slate-100 p-1 rounded-xl">
+                <button
+                  onClick={() => setMapView(false)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                    !mapView ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'
+                  }`}
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+                  </svg>
+                  Grid
+                </button>
+                <button
+                  onClick={() => setMapView(true)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                    mapView ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'
+                  }`}
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 16l4.553 2.276A1 1 0 0021 24.382V8.618a1 1 0 00-.553-.894L15 5m0 18V5m0 0L9 7" />
+                  </svg>
+                  Map
+                </button>
+              </div>
             </div>
           </div>
         )}
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8 px-2">
-          {(viewMode === "home" ? filteredPGs.slice(0, 4) : filteredPGs).map((pg) => (
-            <div
-              key={pg.id}
-              onClick={() => {
-                if(user) {
-                   setSelectedPG(pg);
-                   setContactMode("none");
-                } else {
-                   setShowAuthModal(true);
-                }
-              }}
-              className="group cursor-pointer bg-white rounded-[2rem] overflow-hidden border border-slate-100 shadow-sm hover:shadow-2xl transition-all duration-500"
-            >
-              <div className="relative h-56 overflow-hidden">
-                <img src={pg.img} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700" alt={pg.title} />
-                <div className="absolute bottom-4 left-4 px-3 py-1 bg-indigo-600/90 backdrop-blur text-white text-[10px] font-black rounded-lg">⭐ {pg.rating}</div>
-                {pg.availability && (
-                  <div className={`absolute top-4 left-4 px-3 py-1.5 backdrop-blur-md text-white text-[10px] uppercase tracking-widest font-black rounded-lg shadow-lg ${
-                    pg.availability.includes('Available Now') ? 'bg-emerald-500/90' :
-                    pg.availability.includes('Filling Fast') ? 'bg-rose-500/90' :
-                    'bg-blue-500/90'
-                  }`}>
-                    {pg.availability}
-                  </div>
-                )}
-              </div>
-              <div className="p-6">
-                <div className="flex justify-between items-start mb-2">
-                  <h4 className="font-bold text-slate-900 text-lg group-hover:text-indigo-600 transition-colors">{pg.title}</h4>
-                  <p className="text-xl font-black text-indigo-600">₹{pg.price}</p>
+
+        {/* 🗺️ Map View */}
+        {mapView && viewMode === "all" && (
+          <div className="px-2 mb-12">
+            <Suspense fallback={
+              <div className="rounded-3xl border border-slate-200 shadow-2xl bg-slate-100 flex items-center justify-center" style={{ height: '600px' }}>
+                <div className="text-center text-slate-400">
+                  <div className="text-5xl mb-3">🗺️</div>
+                  <p className="font-bold text-sm">Loading Map...</p>
                 </div>
-                <p className="text-[11px] text-slate-400 mb-6 italic leading-snug">📍 {pg.location}</p>
-                <button className="w-full py-3.5 rounded-2xl bg-slate-50 text-indigo-600 font-black text-xs uppercase tracking-widest border border-slate-100 group-hover:bg-indigo-600 group-hover:text-white transition-all">
-                  View Details
+              </div>
+            }>
+              <PGMap
+                pgs={filteredPGs}
+                onSelect={(pg) => { setSelectedPG(pg); setContactMode('none'); }}
+                user={user}
+                setShowAuthModal={setShowAuthModal}
+              />
+            </Suspense>
+            {filteredPGs.filter(pg => !pg.lat).length > 0 && (
+              <p className="text-center text-xs text-slate-400 mt-3 font-medium">
+                {filteredPGs.filter(pg => !pg.lat).length} PG(s) not shown — coordinates not yet set by owner.
+              </p>
+            )}
+          </div>
+        )}
+
+
+
+        {!mapView && (
+          <div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8 px-2">
+              {(viewMode === "home" ? filteredPGs.slice(0, 4) : filteredPGs).map((pg) => (
+                <div
+                  key={pg.id}
+                  onClick={() => {
+                    if(user) {
+                       setSelectedPG(pg);
+                       setContactMode("none");
+                    } else {
+                       setShowAuthModal(true);
+                    }
+                  }}
+                  className="group cursor-pointer bg-white rounded-[2rem] overflow-hidden border border-slate-100 shadow-sm hover:shadow-2xl transition-all duration-500"
+                >
+                  {/* Review star overlay computed from Firestore average */}
+                  <div className="relative h-56 overflow-hidden">
+                    <img src={pg.img} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700" alt={pg.title} />
+                    <div className="absolute bottom-4 left-4 px-3 py-1 bg-indigo-600/90 backdrop-blur text-white text-[10px] font-black rounded-lg">⭐ {pg.rating}</div>
+                    {pg.availability && (
+                      <div className={`absolute top-4 left-4 px-3 py-1.5 backdrop-blur-md text-white text-[10px] uppercase tracking-widest font-black rounded-lg shadow-lg ${
+                        pg.availability.includes('Available Now') ? 'bg-emerald-500/90' :
+                        pg.availability.includes('Filling Fast') ? 'bg-rose-500/90' :
+                        'bg-blue-500/90'
+                      }`}>
+                        {pg.availability}
+                      </div>
+                    )}
+                  </div>
+                  <div className="p-6">
+                    <div className="flex justify-between items-start mb-2">
+                      <h4 className="font-bold text-slate-900 text-lg group-hover:text-indigo-600 transition-colors">{pg.title}</h4>
+                      <p className="text-xl font-black text-indigo-600">₹{pg.price}</p>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mb-6 italic leading-snug">📍 {pg.location}</p>
+                    <button className="w-full py-3.5 rounded-2xl bg-slate-50 text-indigo-600 font-black text-xs uppercase tracking-widest border border-slate-100 group-hover:bg-indigo-600 group-hover:text-white transition-all">
+                      View Details
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {viewMode === "home" && filteredPGs.length > 4 && (
+              <div className="mt-12 flex justify-center">
+                <button
+                  onClick={() => { setViewMode("all"); window.scrollTo({ top: 0, behavior: "smooth" }); }}
+                  className="px-10 py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-bold uppercase tracking-widest text-sm shadow-xl shadow-indigo-200 hover:-translate-y-1 transition-all"
+                >
+                  Show More PGs
                 </button>
               </div>
-            </div>
-          ))}
-        </div>
-
-        {viewMode === "home" && filteredPGs.length > 4 && (
-          <div className="mt-12 flex justify-center">
-            <button
-              onClick={() => { setViewMode("all"); window.scrollTo({ top: 0, behavior: "smooth" }); }}
-              className="px-10 py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-bold uppercase tracking-widest text-sm shadow-xl shadow-indigo-200 hover:-translate-y-1 transition-all"
-            >
-              Show More PGs
-            </button>
+            )}
           </div>
         )}
       </section>
@@ -810,6 +1144,112 @@ function App() {
                     ))}
                   </div>
                 </div>
+              </div>
+
+              {/* ⭐ Reviews Section */}
+              <div className="mt-8 pt-6 border-t border-slate-200">
+                <div className="flex items-center justify-between mb-5">
+                  <div>
+                    <h4 className="text-xs font-black tracking-widest uppercase text-slate-400">Verified Reviews</h4>
+                    {reviews.length > 0 && (
+                      <div className="flex items-center gap-2 mt-1">
+                        <span className="text-2xl font-black text-slate-900">
+                          {(reviews.reduce((a, r) => a + (r.rating || 5), 0) / reviews.length).toFixed(1)}
+                        </span>
+                        <div className="flex">
+                          {[1,2,3,4,5].map(s => (
+                            <svg key={s} className={`w-4 h-4 ${s <= Math.round(reviews.reduce((a,r) => a+(r.rating||5),0)/reviews.length) ? 'text-amber-400' : 'text-slate-200'}`} fill="currentColor" viewBox="0 0 20 20">
+                              <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+                            </svg>
+                          ))}
+                        </div>
+                        <span className="text-xs text-slate-400 font-medium">{reviews.length} review{reviews.length !== 1 ? 's' : ''}</span>
+                      </div>
+                    )}
+                  </div>
+                  {canReview && !showReviewForm && (
+                    <button
+                      onClick={() => setShowReviewForm(true)}
+                      className="px-4 py-2 bg-amber-50 text-amber-700 border border-amber-200 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-amber-100 transition-all"
+                    >
+                      ✍️ Write Review
+                    </button>
+                  )}
+                </div>
+
+                {/* Write Review Form */}
+                {showReviewForm && canReview && (
+                  <div className="mb-5 p-5 bg-amber-50 rounded-2xl border border-amber-200 animate-in slide-in-from-top-2 duration-300">
+                    <div className="flex items-center gap-1 mb-3">
+                      {[1,2,3,4,5].map(s => (
+                        <button
+                          key={s}
+                          onMouseEnter={() => setReviewHover(s)}
+                          onMouseLeave={() => setReviewHover(0)}
+                          onClick={() => setReviewRating(s)}
+                          className="transition-transform hover:scale-125"
+                        >
+                          <svg className={`w-7 h-7 ${s <= (reviewHover || reviewRating) ? 'text-amber-400' : 'text-slate-300'} transition-colors`} fill="currentColor" viewBox="0 0 20 20">
+                            <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+                          </svg>
+                        </button>
+                      ))}
+                      <span className="ml-2 text-sm font-bold text-amber-700">{reviewRating}/5</span>
+                    </div>
+                    <textarea
+                      value={reviewText}
+                      onChange={e => setReviewText(e.target.value)}
+                      placeholder="Share your honest experience staying here..."
+                      rows={3}
+                      className="w-full px-4 py-3 bg-white border border-amber-200 rounded-xl text-sm font-medium text-slate-800 outline-none focus:border-amber-400 resize-none placeholder:text-slate-400"
+                    />
+                    <div className="flex gap-3 mt-3">
+                      <button
+                        onClick={handleSubmitReview}
+                        disabled={isSubmittingReview || !reviewText.trim()}
+                        className="flex-1 py-3 bg-amber-500 hover:bg-amber-600 text-white font-black rounded-xl text-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-amber-200"
+                      >
+                        {isSubmittingReview ? 'Submitting...' : '⭐ Submit Review'}
+                      </button>
+                      <button onClick={() => setShowReviewForm(false)} className="px-5 py-3 bg-white border border-slate-200 text-slate-600 font-bold rounded-xl text-sm hover:bg-slate-50 transition-all">
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Review List */}
+                {reviews.length === 0 ? (
+                  <div className="text-center py-8 text-slate-400">
+                    <div className="text-4xl mb-2">⭐</div>
+                    <p className="text-sm font-medium">No reviews yet.</p>
+                    {!canReview && <p className="text-xs mt-1">Complete a visit to leave a verified review.</p>}
+                  </div>
+                ) : (
+                  <div className="space-y-4 max-h-60 overflow-y-auto pr-1">
+                    {reviews.map(r => (
+                      <div key={r.id} className="bg-white rounded-2xl p-4 border border-slate-100 shadow-sm">
+                        <div className="flex items-center gap-3 mb-2">
+                          <img src={r.userPhoto || `https://api.dicebear.com/7.x/avataaars/svg?seed=${r.userName}`} alt={r.userName} className="w-9 h-9 rounded-full border-2 border-indigo-50" />
+                          <div className="flex-1">
+                            <p className="text-sm font-bold text-slate-900">{r.userName}</p>
+                            <div className="flex">
+                              {[1,2,3,4,5].map(s => (
+                                <svg key={s} className={`w-3 h-3 ${s <= r.rating ? 'text-amber-400' : 'text-slate-200'}`} fill="currentColor" viewBox="0 0 20 20">
+                                  <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+                                </svg>
+                              ))}
+                            </div>
+                          </div>
+                          <span className="text-[10px] text-slate-400 font-medium">
+                            {r.createdAt?.toDate ? r.createdAt.toDate().toLocaleDateString('en-IN', { day:'numeric', month:'short', year:'numeric' }) : 'Recently'}
+                          </span>
+                        </div>
+                        <p className="text-sm text-slate-700 leading-relaxed">{r.text}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* Action Buttons */}
