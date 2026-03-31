@@ -6,32 +6,35 @@ import { doc, setDoc, getDoc, updateDoc, onSnapshot, collection, query, addDoc, 
 import { messaging } from './firebaseConfig';
 import { onMessage } from 'firebase/messaging';
 import { requestForToken } from './lib/fcmUtils';
+import { motion, AnimatePresence } from 'framer-motion';
 
 // Lazy load the entire map component to prevent crashing the main bundle
 const PGMap = lazy(() =>
   import('react-leaflet').then(({ MapContainer, TileLayer, Marker, Popup }) => ({
-    default: ({ pgs, onSelect, user, setShowAuthModal }) => {
-      // Fix Leaflet icons
-      import('leaflet').then(({ default: L }) => {
-        try {
-          const icon = L.icon({
-            iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-            iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-            shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
-            iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41],
-          });
-          L.Marker.prototype.options.icon = icon;
-        } catch(e) {}
-      });
+    default: ({ pgs, onSelect, user, setShowAuthModal, hoveredPG }) => {
+      const [leaf, setLeaf] = useState(null);
+      useEffect(() => {
+        import('leaflet').then((L) => setLeaf(L.default || L));
+      }, []);
+
+      const getIcon = (isHover) => {
+        if (!leaf) return undefined;
+        return leaf.divIcon({
+          className: 'bg-transparent border-none',
+          html: `<div class="w-full h-full rounded-2xl border-2 border-white flex items-center justify-center transition-all duration-300 ${isHover ? 'bg-indigo-600 scale-[1.3] shadow-[0_0_15px_rgba(79,70,229,0.8)]' : 'bg-rose-500 shadow-lg'}"></div>`,
+          iconSize: isHover ? [24, 24] : [16, 16],
+          iconAnchor: isHover ? [12, 12] : [8, 8]
+        });
+      };
+
       return (
-        <div style={{ height: '600px' }} className="rounded-3xl overflow-hidden border border-slate-200 shadow-2xl">
-          <MapContainer center={[20.3000, 85.8245]} zoom={12} style={{ height: '100%', width: '100%' }} scrollWheelZoom>
-            <TileLayer
-              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-            />
-            {pgs.filter(p => p.lat && p.lng).map(pg => (
-              <Marker key={pg.id} position={[pg.lat, pg.lng]}>
+        <div style={{ height: '100%', minHeight: '100%' }} className="rounded-3xl overflow-hidden bg-slate-100 flex-1 relative shadow-inner">
+          <MapContainer center={[20.3000, 85.8245]} zoom={12} style={{ height: '100%', width: '100%', position: 'absolute', inset: 0 }} scrollWheelZoom>
+            <TileLayer attribution='&copy; OpenStreetMap' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+            {pgs.filter(p => p.lat && p.lng).map(pg => {
+              const hover = pg.id === hoveredPG;
+              return (
+              <Marker key={pg.id} position={[pg.lat, pg.lng]} icon={leaf ? getIcon(hover) : undefined} zIndexOffset={hover ? 1000 : 0}>
                 <Popup>
                   <div style={{ minWidth: 180 }}>
                     <img src={pg.img} alt={pg.title} style={{ width:'100%', height:96, objectFit:'cover', borderRadius:8, marginBottom:8 }} />
@@ -45,7 +48,7 @@ const PGMap = lazy(() =>
                   </div>
                 </Popup>
               </Marker>
-            ))}
+            )})}
           </MapContainer>
         </div>
       );
@@ -59,8 +62,23 @@ const fallbackPGs = [
   { id: 2, title: "Lotus Girls Niwas", location: "Nayapalli, behind Indradhanu Market", price: "6,800", rating: "4.5", type: "girls", owner: "Priyanka Jena", availableBeds: "2", totalBeds: "15", owner_uid: "testOwner2", amenities: ["Laundry", "Attached Washroom", "Kitchen Access", "Security"], img: "https://images.unsplash.com/photo-1598928506311-c55ded91a20c?auto=format&fit=crop&q=80&w=800", availability: "Filling Fast", lat: 20.2746, lng: 85.8258 },
 ];
 
+const PGSkeleton = () => (
+  <div className="bg-white rounded-[2rem] overflow-hidden border border-slate-100 shadow-sm animate-pulse">
+    <div className="h-56 bg-slate-200"></div>
+    <div className="p-6">
+      <div className="flex justify-between items-start mb-2">
+        <div className="w-1/2 h-6 bg-slate-200 rounded-full"></div>
+        <div className="w-1/4 h-6 bg-slate-200 rounded-full"></div>
+      </div>
+      <div className="w-1/3 h-4 bg-slate-200 rounded-full mb-6"></div>
+      <div className="w-full h-12 rounded-2xl bg-slate-100 mt-2"></div>
+    </div>
+  </div>
+);
+
 function App() {
   const [pgListings, setPgListings] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
   const [activeType, setActiveType] = useState("all");
 
@@ -70,7 +88,7 @@ function App() {
   const [filterAC, setFilterAC] = useState("all");    // "all" | "ac" | "non-ac"
   const [filterSharing, setFilterSharing] = useState("all"); // "all" | "single" | "double" | "triple"
   const [activeFiltersCount, setActiveFiltersCount] = useState(0);
-  const [mapView, setMapView] = useState(false); // toggle between grid and map
+  const [hoveredPG, setHoveredPG] = useState(null);
   const [selectedPG, setSelectedPG] = useState(null);
 
   const [showAuthModal, setShowAuthModal] = useState(false);
@@ -80,6 +98,9 @@ function App() {
   const [contactMode, setContactMode] = useState("none"); // "none" | "chat" | "schedule"
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState([]);
+  const [showAIChat, setShowAIChat] = useState(false);
+  const [aiMessages, setAiMessages] = useState([{ role: 'bot', text: "Hi! I'm your AI Matchmaker. Tell me what you're looking for (e.g., 'girls pg near KIIT under 10000 with ac')." }]);
+  const [aiInput, setAiInput] = useState("");
   const [visitDate, setVisitDate] = useState("");
   const [visitTime, setVisitTime] = useState("");
 
@@ -222,6 +243,7 @@ function App() {
       
       // If no properties in DB, use fallbacks for visual richness
       setPgListings(fetchedPGs.length > 0 ? fetchedPGs : fallbackPGs);
+      setIsLoading(false);
     });
 
     return () => {
@@ -472,6 +494,52 @@ function App() {
     return results;
   }, [pgListings, searchTerm, activeType, budgetMax, filterAC, filterSharing, fuse]);
 
+  const handleAISubmit = (e) => {
+    e.preventDefault();
+    if (!aiInput.trim()) return;
+    
+    const userMsg = aiInput.toLowerCase();
+    setAiMessages(prev => [...prev, { role: 'user', text: aiInput }]);
+    let responseText = "I've applied those filters for you! Check out the updated map and grid.";
+    let filtered = false;
+
+    if (userMsg.includes('girl') || userMsg.includes('female')) { setActiveType('girls'); filtered = true; }
+    if (userMsg.includes('boy') || userMsg.includes('male')) { setActiveType('boys'); filtered = true; }
+    
+    if (userMsg.includes('ac') && !userMsg.includes('non')) { setFilterAC('ac'); filtered = true; }
+    if (userMsg.includes('non-ac') || userMsg.includes('non ac') || userMsg.includes('without ac')) { setFilterAC('non-ac'); filtered = true; }
+
+    if (userMsg.includes('single')) { setFilterSharing('single'); filtered = true; }
+    if (userMsg.includes('double') || userMsg.includes('sharing')) { setFilterSharing('double'); filtered = true; }
+    
+    const budgetMatch = userMsg.match(/(?:under|below|max)\s*v?(\d+k?)/i) || userMsg.match(/(\d+k?)\s*(?:max|budget)/i);
+    if (budgetMatch) {
+      let num = budgetMatch[1].replace(/k/i, '000');
+      num = parseInt(num) || 20000;
+      setBudgetMax(num);
+      filtered = true;
+    }
+
+    if (userMsg.includes('near') || userMsg.includes('in') || userMsg.includes('around')) {
+      const locMatch = userMsg.match(/(?:near|in|around)\s+([a-zA-Z0-9]+)/i);
+      if (locMatch && locMatch[1]) {
+        setSearchTerm(locMatch[1]);
+        filtered = true;
+      }
+    }
+
+    if (filtered) {
+      responseText = "I've applied those filters for you! Here are some top matches:";
+    } else {
+      responseText = "I'm not quite sure how to filter that. Try specifying a budget (e.g. 'under 8000'), AC/Non-AC, or a location near you!";
+    }
+
+    setTimeout(() => {
+      setAiMessages(prev => [...prev, { role: 'bot', text: responseText, showResults: filtered }]);
+    }, 600);
+    setAiInput("");
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
 
@@ -637,90 +705,70 @@ function App() {
                   {activeFiltersCount} Filter{activeFiltersCount > 1 ? 's' : ''} Active
                 </button>
               )}
-              {/* Map / Grid toggle */}
-              <div className="flex bg-slate-100 p-1 rounded-xl">
-                <button
-                  onClick={() => setMapView(false)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
-                    !mapView ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'
-                  }`}
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
-                  </svg>
-                  Grid
-                </button>
-                <button
-                  onClick={() => setMapView(true)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
-                    mapView ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'
-                  }`}
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 16l4.553 2.276A1 1 0 0021 24.382V8.618a1 1 0 00-.553-.894L15 5m0 18V5m0 0L9 7" />
-                  </svg>
-                  Map
-                </button>
-              </div>
             </div>
           </div>
         )}
 
 
-        {/* 🗺️ Map View */}
-        {mapView && viewMode === "all" && (
-          <div className="px-2 mb-12">
-            <Suspense fallback={
-              <div className="rounded-3xl border border-slate-200 shadow-2xl bg-slate-100 flex items-center justify-center" style={{ height: '600px' }}>
-                <div className="text-center text-slate-400">
-                  <div className="text-5xl mb-3">🗺️</div>
-                  <p className="font-bold text-sm">Loading Map...</p>
-                </div>
-              </div>
-            }>
-              <PGMap
-                pgs={filteredPGs}
-                onSelect={(pg) => { setSelectedPG(pg); setContactMode('none'); }}
-                user={user}
-                setShowAuthModal={setShowAuthModal}
-              />
-            </Suspense>
-            {filteredPGs.filter(pg => !pg.lat).length > 0 && (
-              <p className="text-center text-xs text-slate-400 mt-3 font-medium">
-                {filteredPGs.filter(pg => !pg.lat).length} PG(s) not shown — coordinates not yet set by owner.
-              </p>
-            )}
+        {viewMode === "all" ? (
+          <div className="flex flex-col-reverse lg:flex-row items-start gap-8 px-2 relative pb-24">
+            {/* L: Grid */}
+            <div className="w-full lg:w-3/5">
+                <motion.div layout className="grid grid-cols-1 sm:grid-cols-2 gap-8">
+                  <AnimatePresence mode="popLayout">
+                  {isLoading ? [...Array(6)].map((_, i) => <motion.div layout initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} key={`sk-${i}`}><PGSkeleton /></motion.div>) : filteredPGs.map((pg, index) => (
+                    <motion.div layout initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1, transition: { delay: (index % 12) * 0.05, duration: 0.3 } }} exit={{ opacity: 0, scale: 0.9, transition: { duration: 0.2 } }} key={pg.id}
+                      onMouseEnter={() => setHoveredPG(pg.id)} onMouseLeave={() => setHoveredPG(null)}
+                      onClick={() => { if(user) { setSelectedPG(pg); setContactMode("none"); } else { setShowAuthModal(true); } }}
+                      className="group cursor-pointer bg-white rounded-[2rem] overflow-hidden border border-slate-100 shadow-sm hover:shadow-2xl transition-all duration-500"
+                    >
+                      <div className="relative h-56 overflow-hidden">
+                        <img loading="lazy" src={pg.img} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 bg-slate-200" alt={pg.title} />
+                        <div className="absolute bottom-4 left-4 px-3 py-1 bg-indigo-600/90 backdrop-blur text-white text-[10px] font-black rounded-lg">⭐ {pg.rating}</div>
+                        {pg.availability && (
+                          <div className={`absolute top-4 left-4 px-3 py-1.5 backdrop-blur-md text-white text-[10px] uppercase tracking-widest font-black rounded-lg shadow-lg ${pg.availability.includes('Available Now') ? 'bg-emerald-500/90' : pg.availability.includes('Filling Fast') ? 'bg-rose-500/90' : 'bg-blue-500/90'}`}>
+                            {pg.availability}
+                          </div>
+                        )}
+                      </div>
+                      <div className="p-6">
+                        <div className="flex justify-between items-start mb-2">
+                          <h4 className="font-bold text-slate-900 text-lg group-hover:text-indigo-600 transition-colors">{pg.title}</h4>
+                          <p className="text-xl font-black text-indigo-600">₹{pg.price}</p>
+                        </div>
+                        <p className="text-[11px] text-slate-400 mb-6 italic leading-snug">📍 {pg.location}</p>
+                        <div className="flex gap-2 w-full">
+                          <button className="flex-1 py-3.5 rounded-2xl bg-slate-50 text-indigo-600 font-black text-xs uppercase tracking-widest border border-slate-100 group-hover:bg-indigo-600 group-hover:text-white transition-all">View Details</button>
+                          <button onClick={(e) => { e.stopPropagation(); setViewMode("all"); setHoveredPG(pg.id); window.scrollTo({ top: 0, behavior: "smooth" }); }} className="px-5 py-3.5 rounded-2xl bg-slate-50 text-indigo-600 font-black text-xs uppercase tracking-widest border border-slate-100 group-hover:bg-indigo-600 group-hover:text-white transition-all" title="Locate on Map">📍</button>
+                        </div>
+                      </div>
+                    </motion.div>
+                  ))}
+                  </AnimatePresence>
+                </motion.div>
+            </div>
+            {/* R: Map */}
+            <div className="w-full lg:w-2/5 lg:sticky lg:top-[120px] rounded-[2rem] overflow-hidden shadow-2xl border border-slate-200" style={{ height: 'calc(100vh - 150px)', minHeight: '400px', zIndex: 10 }}>
+               <Suspense fallback={<div className="w-full h-full bg-slate-100 flex items-center justify-center text-slate-400 font-black text-sm">🗺️ Loading Map...</div>}>
+                   <PGMap pgs={filteredPGs} onSelect={(pg) => { setSelectedPG(pg); setContactMode('none'); }} user={user} setShowAuthModal={setShowAuthModal} hoveredPG={hoveredPG} />
+               </Suspense>
+            </div>
           </div>
-        )}
-
-
-
-        {!mapView && (
-          <div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8 px-2">
-              {(viewMode === "home" ? filteredPGs.slice(0, 4) : filteredPGs).map((pg) => (
-                <div
-                  key={pg.id}
-                  onClick={() => {
-                    if(user) {
-                       setSelectedPG(pg);
-                       setContactMode("none");
-                    } else {
-                       setShowAuthModal(true);
-                    }
-                  }}
+        ) : (
+          <div className="px-2 pb-24">
+            <motion.div layout className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8">
+              <AnimatePresence mode="popLayout">
+              {isLoading ? [...Array(4)].map((_, i) => <motion.div layout initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} key={`skl-${i}`}><PGSkeleton /></motion.div>) : filteredPGs.slice(0, 4).map((pg, index) => (
+                <motion.div layout initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1, transition: { delay: (index % 12) * 0.05, duration: 0.3 } }} exit={{ opacity: 0, scale: 0.9, transition: { duration: 0.2 } }} key={pg.id}
+                  onMouseEnter={() => setHoveredPG(pg.id)} onMouseLeave={() => setHoveredPG(null)}
+                  onClick={() => { if(user) { setSelectedPG(pg); setContactMode("none"); } else { setShowAuthModal(true); } }}
                   className="group cursor-pointer bg-white rounded-[2rem] overflow-hidden border border-slate-100 shadow-sm hover:shadow-2xl transition-all duration-500"
                 >
-                  {/* Review star overlay computed from Firestore average */}
                   <div className="relative h-56 overflow-hidden">
                     <img src={pg.img} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700" alt={pg.title} />
                     <div className="absolute bottom-4 left-4 px-3 py-1 bg-indigo-600/90 backdrop-blur text-white text-[10px] font-black rounded-lg">⭐ {pg.rating}</div>
                     {pg.availability && (
-                      <div className={`absolute top-4 left-4 px-3 py-1.5 backdrop-blur-md text-white text-[10px] uppercase tracking-widest font-black rounded-lg shadow-lg ${
-                        pg.availability.includes('Available Now') ? 'bg-emerald-500/90' :
-                        pg.availability.includes('Filling Fast') ? 'bg-rose-500/90' :
-                        'bg-blue-500/90'
-                      }`}>
+                      <div className={`absolute top-4 left-4 px-3 py-1.5 backdrop-blur-md text-white text-[10px] uppercase tracking-widest font-black rounded-lg shadow-lg ${pg.availability.includes('Available Now') ? 'bg-emerald-500/90' : pg.availability.includes('Filling Fast') ? 'bg-rose-500/90' : 'bg-blue-500/90'}`}>
                         {pg.availability}
                       </div>
                     )}
@@ -731,21 +779,19 @@ function App() {
                       <p className="text-xl font-black text-indigo-600">₹{pg.price}</p>
                     </div>
                     <p className="text-[11px] text-slate-400 mb-6 italic leading-snug">📍 {pg.location}</p>
-                    <button className="w-full py-3.5 rounded-2xl bg-slate-50 text-indigo-600 font-black text-xs uppercase tracking-widest border border-slate-100 group-hover:bg-indigo-600 group-hover:text-white transition-all">
-                      View Details
-                    </button>
+                    <div className="flex gap-2 w-full">
+                      <button className="flex-1 py-3.5 rounded-2xl bg-slate-50 text-indigo-600 font-black text-xs uppercase tracking-widest border border-slate-100 group-hover:bg-indigo-600 group-hover:text-white transition-all">View Details</button>
+                      <button onClick={(e) => { e.stopPropagation(); setViewMode("all"); setHoveredPG(pg.id); window.scrollTo({ top: 0, behavior: "smooth" }); }} className="px-5 py-3.5 rounded-2xl bg-slate-50 text-indigo-600 font-black text-xs uppercase tracking-widest border border-slate-100 group-hover:bg-indigo-600 group-hover:text-white transition-all" title="Locate on Map">📍</button>
+                    </div>
                   </div>
-                </div>
+                </motion.div>
               ))}
-            </div>
-
-            {viewMode === "home" && filteredPGs.length > 4 && (
+              </AnimatePresence>
+            </motion.div>
+            {filteredPGs.length > 0 && (
               <div className="mt-12 flex justify-center">
-                <button
-                  onClick={() => { setViewMode("all"); window.scrollTo({ top: 0, behavior: "smooth" }); }}
-                  className="px-10 py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-bold uppercase tracking-widest text-sm shadow-xl shadow-indigo-200 hover:-translate-y-1 transition-all"
-                >
-                  Show More PGs
+                <button onClick={() => { setViewMode("all"); window.scrollTo({ top: 0, behavior: "smooth" }); }} className="px-10 py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-bold uppercase tracking-widest text-sm shadow-xl shadow-indigo-200 hover:-translate-y-1 transition-all">
+                  {filteredPGs.length > 4 ? `Explore ${filteredPGs.length} Properties` : `View on Map`}
                 </button>
               </div>
             )}
@@ -1327,6 +1373,78 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* AI Smart Matchmaker UI */}
+      <div className="fixed bottom-6 right-6 z-50">
+        <AnimatePresence>
+        {showAIChat && (
+          <motion.div initial={{ opacity: 0, y: 50, scale: 0.9 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 50, scale: 0.9 }} className="absolute bottom-16 right-0 w-80 bg-white shadow-[0_0_40px_rgba(0,0,0,0.15)] rounded-3xl overflow-hidden border border-slate-100 flex flex-col mb-4">
+            <div className="bg-indigo-600 p-4 text-white flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 bg-white/20 rounded-full flex items-center justify-center text-lg shadow-inner">🤖</div>
+                <div>
+                  <h4 className="font-black text-sm">AI Matchmaker</h4>
+                  <p className="text-[10px] text-indigo-200 font-bold tracking-widest uppercase mt-0.5">Online</p>
+                </div>
+              </div>
+              <button onClick={() => setShowAIChat(false)} className="text-white hover:bg-white/20 p-1.5 rounded-lg transition-colors">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
+            </div>
+            <div className="h-72 bg-slate-50 p-4 overflow-y-auto flex flex-col gap-3">
+              {aiMessages.map((msg, idx) => (
+                <div key={idx} className={`max-w-[85%] p-3 rounded-2xl text-xs font-medium leading-relaxed shadow-sm ${msg.role === 'bot' ? 'bg-indigo-100/50 border border-indigo-100 text-indigo-900 self-start rounded-tl-sm' : 'bg-slate-800 text-white self-end rounded-tr-sm'}`}>
+                  {msg.text}
+                  {msg.showResults && (
+                    <div className="mt-3 flex flex-col gap-2">
+                       {filteredPGs.slice(0, 2).map(pg => (
+                          <div key={pg.id} className="bg-white rounded-xl p-2 flex flex-col gap-2 border border-indigo-100 shadow-sm hover:border-indigo-300 transition-colors">
+                             <div className="flex gap-3 cursor-pointer" onClick={() => { setSelectedPG(pg); setShowAIChat(false); }}>
+                               <img src={pg.img} className="w-12 h-12 rounded-lg object-cover bg-slate-100" alt={pg.title} />
+                               <div className="flex-1 min-w-0 flex flex-col justify-center">
+                                 <p className="text-[11px] font-bold text-slate-800 truncate leading-tight mb-0.5">{pg.title}</p>
+                                 <p className="text-[11px] text-indigo-600 font-black">₹{pg.price}</p>
+                               </div>
+                             </div>
+                             <button onClick={() => { 
+                                  setViewMode("all"); 
+                                  setHoveredPG(pg.id); 
+                                  setShowAIChat(false); 
+                                  window.scrollTo({ top: 0, behavior: "smooth" }); 
+                               }} 
+                               className="w-full text-center py-1.5 bg-indigo-50 text-indigo-600 rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-indigo-100 transition-colors">
+                                📍 Locate on Map
+                             </button>
+                          </div>
+                       ))}
+                       {filteredPGs.length > 0 && (
+                          <button onClick={() => { setViewMode("all"); setShowAIChat(false); window.scrollTo({ top: 0, behavior: "smooth" }); }} className="w-full text-center py-2.5 bg-indigo-50 text-indigo-700 rounded-xl text-[10px] font-black uppercase tracking-widest mt-1 hover:bg-indigo-100 transition-colors shadow-sm">
+                             Show All Properties
+                          </button>
+                       )}
+                       {filteredPGs.length === 0 && (
+                          <p className="text-[10px] text-slate-500 italic mt-1 text-center font-medium">No exact matches found.</p>
+                       )}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+            <form onSubmit={handleAISubmit} className="p-3 bg-white border-t border-slate-100 flex gap-2">
+              <input type="text" value={aiInput} onChange={(e) => setAiInput(e.target.value)} placeholder="Type 'AC under 8k'..." className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs outline-none focus:border-indigo-500 font-medium" />
+              <button type="submit" className="bg-indigo-600 hover:bg-indigo-700 text-white p-2 rounded-xl shrink-0 transition-colors">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M14 5l7 7m0 0l-7 7m7-7H3"/></svg>
+              </button>
+            </form>
+          </motion.div>
+        )}
+        </AnimatePresence>
+        <button onClick={() => setShowAIChat(!showAIChat)} className="w-14 h-14 bg-indigo-600 hover:bg-indigo-700 text-white rounded-full shadow-[0_10px_30px_rgba(79,70,229,0.5)] flex items-center justify-center transition-transform hover:scale-110 relative">
+          <span className="text-2xl">✨</span>
+          {!showAIChat && <span className="absolute top-0 right-0 w-3 h-3 bg-rose-500 rounded-full border-2 border-white animate-pulse"></span>}
+        </button>
+      </div>
+
     </div>
   );
 }
